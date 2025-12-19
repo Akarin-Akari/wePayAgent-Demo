@@ -33,6 +33,13 @@ flowchart TB
         LLM[OllamaLLM<br/>qwen3:4b]
     end
 
+    subgraph Memory["🆕 记忆层"]
+        MM[MemoryManager]
+        STM[ConversationMemory<br/>短期记忆]
+        LTM[SummaryMemory<br/>长期记忆+实体]
+        MemFile[(memory_store/<br/>JSON持久化)]
+    end
+
     subgraph Tools["工具层"]
         KS[knowledge_search<br/>知识库检索]
         OQ[order_query<br/>订单查询 API]
@@ -40,13 +47,13 @@ flowchart TB
 
     subgraph RAG["RAG Pipeline"]
         Loader[文档加载器]
-        Chunker[分块器<br/>RecursiveTextSplitter]
-        Embed[Embedding<br/>bge-m3 / fallback]
-        VectorDB[(SimpleVectorStore<br/>混合检索)]
+        Chunker[智能分块器]
+        Embed[Embedding<br/>bge-m3]
+        VectorDB[(🆕 ChromaDB<br/>持久化向量存储)]
     end
 
     subgraph KB["知识库"]
-        Docs[wxpay_faq.txt]
+        Docs[wxpay_faq.txt<br/>350行丰富内容]
     end
 
     subgraph MockDB["模拟业务系统"]
@@ -55,6 +62,10 @@ flowchart TB
 
     UI -->|用户问题| Core
     Core <-->|Thought/Action| LLM
+    Core <-->|记忆上下文| MM
+    MM --> STM
+    MM --> LTM
+    LTM --> MemFile
     Core -->|调用工具| KS
     Core -->|调用工具| OQ
     KS --> VectorDB
@@ -75,17 +86,26 @@ wePayAgent_Demo/
 ├── agent_demo/                    # ReAct Agent 模块
 │   ├── main.py                    # 主入口 + 环境检查
 │   ├── agent_core.py              # ReAct 引擎核心
-│   └── tools.py                   # 工具定义（RAG + 订单API）
+│   ├── tools.py                   # 工具定义（RAG + 订单API）
+│   ├── memory.py                  # 🆕 对话记忆系统
+│   ├── vector_store.py            # 🆕 ChromaDB 向量存储封装
+│   ├── requirements.txt           # Python 依赖
+│   ├── memory_store/              # 🆕 长期记忆持久化目录
+│   │   └── long_term_memory.json
+│   └── chroma_db/                 # 🆕 ChromaDB 索引存储
 │
-└── rag_demo/                      # RAG Pipeline 模块
-    ├── rag_demo.py                # 完整 RAG 实现
-    ├── evaluate_rag.py            # 自动评测脚本
-    ├── test_ollama.py             # Ollama 连通性测试
-    ├── requirements.txt           # Python 依赖
-    ├── knowledge_base/            # 知识库文档
-    │   └── wxpay_faq.txt
-    └── data/
-        └── benchmark_qa.json      # 评测测试集
+├── rag_demo/                      # RAG Pipeline 模块
+│   ├── rag_demo.py                # 完整 RAG 实现
+│   ├── evaluate_rag.py            # 自动评测脚本
+│   ├── test_ollama.py             # Ollama 连通性测试
+│   ├── requirements.txt           # Python 依赖
+│   ├── knowledge_base/            # 知识库文档（已丰富到350行）
+│   │   └── wxpay_faq.txt
+│   └── data/
+│       └── benchmark_qa.json      # 评测测试集
+│
+└── docs/                          # 开发文档
+    └── 2025-12-20_memory_chromadb.md
 ```
 
 ---
@@ -229,23 +249,25 @@ python evaluate_rag.py
 sequenceDiagram
     participant U as 用户
     participant A as ReAct Agent
+    participant M as 🆕 MemoryManager
     participant L as LLM (qwen3)
     participant T as 工具层
-    participant R as RAG Pipeline
-    participant V as VectorStore
+    participant C as 🆕 ChromaDB
 
-    U->>A: "退款多久到账？"
-    A->>L: System Prompt + 用户问题
-    L-->>A: Thought: 需要查询知识库<br/>Action: knowledge_search
-    A->>T: 调用 knowledge_search("退款到账时间")
-    T->>R: RAG 查询
-    R->>V: 混合检索
-    V-->>R: Top-K 相关文档
-    R-->>T: 检索结果
-    T-->>A: Observation: 1-3个工作日...
+    U->>A: "刚才那个订单什么状态？"
+    A->>M: 获取记忆上下文
+    M-->>A: 实体: ORDER_1001
+    A->>L: System Prompt + 记忆 + 问题
+    L-->>A: Thought: 用户指ORDER_1001<br/>Action: order_query
+    A->>T: 调用 order_query("ORDER_1001")
+    T-->>A: Observation: 已完成, ¥99...
     A->>L: 继续推理
-    L-->>A: Final Answer: 退款一般1-3个工作日到账
+    L-->>A: Final Answer: 您的订单已完成
+    A->>M: 保存本轮对话
     A-->>U: 🤖 返回最终回答
+
+    Note over M: 会话结束时持久化到 JSON
+    Note over C: 知识库已预索引 75 个文档块
 ```
 
 ---
