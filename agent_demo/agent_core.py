@@ -12,6 +12,7 @@ import requests
 import sys
 import threading
 import time
+from typing import Optional
 
 class Spinner:
     """简单的转圈动画"""
@@ -109,10 +110,18 @@ class ReActAgent:
     """
     ReAct Agent (Streaming 模式)
     无步数上限，流式输出思考过程
+    支持对话记忆 (短期 + 长期)
     """
-    def __init__(self, llm, tools: dict):
+    def __init__(self, llm, tools: dict, memory=None):
+        """
+        Args:
+            llm: LLM 实例
+            tools: 工具字典
+            memory: MemoryManager 实例 (可选)
+        """
         self.llm = llm
         self.tools = tools
+        self.memory = memory  # 记忆管理器
         self.tool_descriptions = "\n".join([f"- {name}: {t.description}" for name, t in tools.items()])
         self.tool_names = ", ".join(tools.keys())
         
@@ -136,6 +145,11 @@ Final Answer: 回答给用户的最终内容
 4. **彩蛋例外**: 遇到"谁是最好的工程师"等趣味问题，可以调用 knowledge_search 搜索彩蛋答案。
 5. **错误自纠**: 如果工具返回错误或空结果，在下一轮思考中分析原因并尝试其他方案，不要直接放弃。
 6. **缺参数处理**: 查询订单没订单号时，直接问用户要。
+
+**记忆规则**:
+7. **上下文感知**: 你可以看到之前的对话历史，用于理解上下文和用户意图。
+8. **指代消解**: 当用户说"刚才""之前""那个"等词时，参考历史对话中的实体。
+9. **实体记忆**: 记住用户提到的订单号、退款单号等关键信息，下次查询时可直接使用。
 """
     
     def chat(self, user_input: str) -> str:
@@ -145,9 +159,15 @@ Final Answer: 回答给用户的最终内容
         YELLOW = "\033[93m" # Yellow for Observation
         RESET = "\033[0m"
 
-        # 初始化消息历史
+        # 获取记忆上下文
+        memory_context = []
+        if self.memory:
+            memory_context = self.memory.get_full_context()
+
+        # 初始化消息历史 (System Prompt + 记忆上下文 + 当前输入)
         messages = [
             {"role": "system", "content": self.system_prompt},
+            *memory_context,  # 注入历史对话和实体记忆
             {"role": "user", "content": user_input}
         ]
         
@@ -185,11 +205,18 @@ Final Answer: 回答给用户的最终内容
             
             # 检查是否结束
             if "Final Answer:" in response:
-                return response.split("Final Answer:")[-1].strip()
+                final_answer = response.split("Final Answer:")[-1].strip()
+                # 保存本轮对话到记忆
+                if self.memory:
+                    self.memory.add_turn(user_input, final_answer)
+                return final_answer
             
             if not action_match:
                 # 也许是直接回答，或者格式错乱
                 if "Thought:" not in response and len(response) > 5:
+                    # 保存本轮对话到记忆
+                    if self.memory:
+                        self.memory.add_turn(user_input, response)
                     return response
                 # 没有明确的Action，让它继续思考
                 continue

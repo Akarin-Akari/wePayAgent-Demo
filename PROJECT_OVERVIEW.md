@@ -68,12 +68,14 @@ flowchart TB
 
 ## 📂 项目结构
 
-```
+```text
 wePayAgent_Demo/
 ├── agent_demo/                    # ReAct Agent 模块
 │   ├── main.py                    # 主入口 + 环境检查
 │   ├── agent_core.py              # ReAct 引擎核心
-│   └── tools.py                   # 工具定义（RAG + 订单API）
+│   ├── memory.py                  # 🧠 对话记忆系统 (短期+长期)
+│   ├── tools.py                   # 工具定义（RAG + 订单API）
+│   └── memory_store/              # 记忆持久化存储目录
 │
 └── rag_demo/                      # RAG Pipeline 模块
     ├── rag_demo.py                # 完整 RAG 实现
@@ -282,8 +284,8 @@ sequenceDiagram
 
 - [ ] 接入真实业务 API（订单系统、退款系统）
 - [ ] 增强向量存储（引入 Chroma/Milvus）
-- [ ] 添加对话历史记忆（Memory）
-- [ ] 多轮对话上下文管理
+- [x] 添加对话历史记忆（Memory）✅ 已实现
+- [x] 多轮对话上下文管理 ✅ 已实现
 - [ ] Web UI / 小程序前端
 - [ ] 性能监控与日志追踪
 

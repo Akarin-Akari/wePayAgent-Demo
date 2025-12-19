@@ -12,6 +12,7 @@ import subprocess
 import requests
 from tools import get_all_tools
 from agent_core import OllamaLLM, ReActAgent
+from memory import MemoryManager
 
 def check_ollama_installed() -> bool:
     """检查 Ollama 是否安装"""
@@ -142,11 +143,18 @@ def main():
     # 2. 初始化 LLM
     llm = OllamaLLM(model=args.model)
     
-    # 3. 初始化 Agent
-    agent = ReActAgent(llm, tools)
+    # 3. 初始化记忆系统
+    print("🧠 加载记忆系统...")
+    memory = MemoryManager(storage_path="./memory_store")
+    memory.load()  # 加载持久化的长期记忆
+    
+    # 4. 初始化 Agent (带记忆)
+    agent = ReActAgent(llm, tools, memory=memory)
     
     print("\n✅ Agent 就绪! (输入 quit 退出)")
     print("💡 您是不是想问 '微信退款一般多久到账？' 或 '查询微信支付订单 ORDER_1001'？")
+    print("🧠 记忆系统已启用，您可以说'刚才那个订单'来引用之前的对话！")
+    print(f"{memory.get_memory_info()}")
     print("-" * 50)
     
     # 4. 交互循环
@@ -155,6 +163,8 @@ def main():
             user_input = input("\n👤我: ").strip()
             if not user_input: continue
             if user_input.lower() in ["quit", "exit", "q"]:
+                print("👋 正在保存记忆...")
+                memory.end_session()  # 保存记忆
                 print("👋 再见！")
                 break
             
@@ -162,7 +172,9 @@ def main():
             print(f"\n🤖 智能客服: {answer}")
             
         except KeyboardInterrupt:
-            print("\n👋 再见！")
+            print("\n👋 正在保存记忆...")
+            memory.end_session()  # 保存记忆
+            print("👋 再见！")
             break
         except Exception as e:
             print(f"⚠️ Error: {e}")

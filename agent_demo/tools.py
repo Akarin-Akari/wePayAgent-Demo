@@ -3,145 +3,141 @@
 Agent Tools - 智能客服工具集
 ================================
 封装RAG和业务API为Agent可调用的标准工具
+使用 ChromaDB 持久化向量存储
 """
 
 import os
 import sys
 from pathlib import Path
 
-# ============================================================
-# 基础类 (从 rag_demo 复用)
-# ============================================================
-
-class OllamaEmbedding:
-    """Ollama Embedding封装 (bge-m3)"""
-    def __init__(self, model: str = "bge-m3"):
-        self.model = model
-        self.base_url = "http://localhost:11434"
-    
-    def embed(self, text: str) -> list[float]:
-        import requests
-        import hashlib
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/embeddings",
-                json={"model": self.model, "prompt": text},
-                timeout=30
-            )
-            if response.status_code == 200:
-                emb = response.json().get("embedding")
-                if emb: return emb
-        except Exception as e:
-            print(f"⚠️ Embedding Error: {e}")
-        
-        # Fallback
-        hash_bytes = hashlib.md5(text.encode()).digest()
-        return [b / 255.0 for b in hash_bytes[:100]]
-
-
-class SimpleVectorStore:
-    """简单向量存储 (混合检索)"""
-    def __init__(self):
-        self.documents = []
-        self.embeddings = []
-    
-    def add(self, text: str, embedding: list[float]):
-        self.documents.append(text)
-        self.embeddings.append(embedding)
-    
-    def search(self, query: str, query_embedding: list[float], top_k: int = 3) -> list[tuple[str, float]]:
-        import numpy as np
-        scores = []
-        query_tokens = set(query.lower())
-        
-        use_vector = len(query_embedding) >= 128
-        
-        for i, doc_text in enumerate(self.documents):
-            doc_tokens = set(doc_text.lower())
-            intersection = query_tokens.intersection(doc_tokens)
-            union = query_tokens.union(doc_tokens)
-            jaccard_score = len(intersection) / len(union) if union else 0
-            
-            vector_score = 0.0
-            if use_vector:
-                doc_vec = np.array(self.embeddings[i])
-                q_vec = np.array(query_embedding)
-                norm_q = np.linalg.norm(q_vec)
-                norm_d = np.linalg.norm(doc_vec)
-                if norm_q > 0 and norm_d > 0:
-                    vector_score = np.dot(q_vec, doc_vec) / (norm_q * norm_d)
-            
-            if use_vector:
-                final_score = vector_score * 0.7 + jaccard_score * 0.3
-            else:
-                final_score = jaccard_score
-            
-            scores.append((i, final_score))
-        
-        scores.sort(key=lambda x: x[1], reverse=True)
-        return [(self.documents[i], s) for i, s in scores[:top_k]]
+# 导入向量存储模块
+from vector_store import get_vector_store, ChromaVectorStore
 
 
 # ============================================================
-# Tool 1: 知识库检索 (RAG)
+# Tool 1: 知识库检索 (RAG with ChromaDB)
 # ============================================================
 
 class KnowledgeBaseTool:
     """
     知识库检索工具 - 封装 RAG Pipeline
     
-    用于回答：费率、结算周期、政策规则等静态知识问题
+    使用 ChromaDB 持久化向量存储：
+    - 首次运行自动索引知识库
+    - 后续运行直接使用已有索引
+    - 支持大规模知识库
     """
     name = "knowledge_search"
     description = "查询微信支付官方政策、费用标准、操作指南等知识。输入：用户问题"
     
-    def __init__(self, knowledge_dir: str = "../rag_demo/knowledge_base"):
-        self.embedding = OllamaEmbedding()
-        self.vector_store = SimpleVectorStore()
-        self._index_documents(knowledge_dir)
+    def __init__(self, 
+                 knowledge_dir: str = "../rag_demo/knowledge_base",
+                 chroma_dir: str = "./chroma_db",
+                 force_reindex: bool = False):
+        """
+        Args:
+            knowledge_dir: 知识库文档目录
+            chroma_dir: ChromaDB 持久化目录
+            force_reindex: 强制重新索引
+        """
+        self.knowledge_dir = Path(knowledge_dir)
+        
+        # 使用 ChromaDB 向量存储
+        self.vector_store = get_vector_store(
+            use_chroma=True,
+            persist_directory=chroma_dir,
+            collection_name="wxpay_knowledge"
+        )
+        
+        # 检查是否需要索引
+        if force_reindex or self.vector_store.count() == 0:
+            self._index_documents()
+        else:
+            print(f"📚 [KnowledgeTool] 使用已有索引 ({self.vector_store.count()} 个文档块)")
     
-    def _index_documents(self, knowledge_dir: str):
+    def _index_documents(self):
         """加载并索引知识库"""
-        knowledge_path = Path(knowledge_dir)
-        if not knowledge_path.exists():
-            print(f"⚠️ 知识库目录不存在: {knowledge_dir}")
+        if not self.knowledge_dir.exists():
+            print(f"⚠️ 知识库目录不存在: {self.knowledge_dir}")
             return
         
         documents = []
-        for file_path in knowledge_path.glob("*.txt"):
+        for file_path in self.knowledge_dir.glob("*.txt"):
             print(f"📄 [KnowledgeTool] 加载: {file_path.name}")
             with open(file_path, "r", encoding="utf-8") as f:
                 documents.append(f.read())
         
-        # 简单分块
-        chunks = []
-        for doc in documents:
-            current = ""
-            for line in doc.split("\n"):
-                if len(current) + len(line) < 500:
-                    current += line + "\n"
-                else:
-                    if current.strip(): chunks.append(current.strip())
-                    current = line + "\n"
-            if current.strip(): chunks.append(current.strip())
+        # 智能分块：按章节和段落分割
+        chunks = self._smart_chunk(documents)
         
-        print(f"🔧 [KnowledgeTool] 索引 {len(chunks)} 个文档块...")
-        for chunk in chunks:
-            emb = self.embedding.embed(chunk)
-            self.vector_store.add(chunk, emb)
+        print(f"🔧 [KnowledgeTool] 正在索引 {len(chunks)} 个文档块到 ChromaDB...")
+        self.vector_store.add_documents(chunks)
         print("✅ [KnowledgeTool] 索引完成!")
+    
+    def _smart_chunk(self, documents: list[str], chunk_size: int = 800) -> list[str]:
+        """
+        智能分块：按章节标题分割，保持语义完整性
+        
+        Args:
+            documents: 文档列表
+            chunk_size: 最大块大小
+        """
+        chunks = []
+        
+        for doc in documents:
+            lines = doc.split("\n")
+            current_chunk = ""
+            current_section = ""
+            
+            for line in lines:
+                # 检测章节标题
+                if line.startswith("## ") or line.startswith("### "):
+                    # 保存之前的块
+                    if current_chunk.strip():
+                        chunks.append(current_chunk.strip())
+                    # 开始新块，包含章节标题
+                    current_section = line
+                    current_chunk = line + "\n"
+                elif len(current_chunk) + len(line) < chunk_size:
+                    current_chunk += line + "\n"
+                else:
+                    # 当前块满了，保存并开始新块
+                    if current_chunk.strip():
+                        chunks.append(current_chunk.strip())
+                    # 新块以章节标题开头（保持上下文）
+                    if current_section:
+                        current_chunk = current_section + "\n" + line + "\n"
+                    else:
+                        current_chunk = line + "\n"
+            
+            # 保存最后一个块
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+        
+        return chunks
     
     def run(self, query: str) -> str:
         """执行知识库检索"""
-        query_emb = self.embedding.embed(query)
-        results = self.vector_store.search(query, query_emb, top_k=3)
+        results = self.vector_store.search(query, top_k=3)
         
         if not results:
             return "未找到相关知识。"
         
         # 拼接检索结果
-        context = "\n---\n".join([doc for doc, _ in results])
+        context_parts = []
+        for i, (doc, score) in enumerate(results, 1):
+            # 截取关键部分，避免返回太长
+            doc_preview = doc[:500] + "..." if len(doc) > 500 else doc
+            context_parts.append(f"【{i}】(相关度:{score:.2f})\n{doc_preview}")
+        
+        context = "\n---\n".join(context_parts)
         return f"【检索到的知识】\n{context}"
+    
+    def reindex(self):
+        """手动触发重新索引"""
+        print("🔄 [KnowledgeTool] 清空并重新索引...")
+        self.vector_store.clear()
+        self._index_documents()
 
 
 # ============================================================
@@ -172,7 +168,6 @@ class OrderQueryTool:
         
         # 如果用户只输入了数字，尝试自动补全前缀
         if order_id.isdigit():
-            # 尝试匹配 ORDER_ 或 REF_ 前缀
             possible_ids = [f"ORDER_{order_id}", f"REF_{order_id}"]
             for pid in possible_ids:
                 if pid in self.MOCK_DB:
